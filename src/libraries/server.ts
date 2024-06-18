@@ -7,10 +7,11 @@ import http, { Server } from "node:http";
 import net from "node:net";
 import url from "node:url";
 import { getProxyForUrl } from "proxy-from-env";
-import { createReadStream } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import colors from "colors";
 import axios from "axios";
+
+const html = readFileSync(`${__dirname}/../index.html`, "utf-8");
 
 function withCORS(headers, request) {
     headers["access-control-allow-origin"] = "*";
@@ -154,7 +155,7 @@ function onProxyResponse(proxy, proxyReq, proxyRes, req, res) {
     return true;
 }
 
-function parseURL(req_url) {
+function parseURL(req_url: string) {
     const match = req_url.match(/^(?:(https?:)?\/\/)?(([^\/?]+?)(?::(\d{0,5})(?=[\/?]|$))?)([\/?][\S\s]*|$)/i);
     //                              ^^^^^^^          ^^^^^^^^      ^^^^^^^                ^^^^^^^^^^^^
     //                            1:protocol       3:hostname     4:port                 5:path + query string
@@ -225,8 +226,8 @@ function getHandler(options, proxy) {
         );
     };
 
-    return function (req, res) {
-        req.corsAnywhereRequestState = {
+    return function (req: http.IncomingMessage, res: http.ServerResponse) {
+        (req as any).corsAnywhereRequestState = {
             getProxyForUrl: corsAnywhere.getProxyForUrl,
             maxRedirects: corsAnywhere.maxRedirects,
             corsMaxAge: corsAnywhere.corsMaxAge,
@@ -240,7 +241,7 @@ function getHandler(options, proxy) {
             return;
         }
 
-        const location = parseURL(req.url.slice(1));
+        const location = parseURL(req.url!.slice(1));
 
         if (corsAnywhere.handleInitialRequest && (corsAnywhere as any).handleInitialRequest(req, res, location)) {
             return;
@@ -250,13 +251,13 @@ function getHandler(options, proxy) {
             // Special case http:/notenoughslashes, because new users of the library frequently make the
             // mistake of putting this application behind a server/router that normalizes the URL.
             // See https://github.com/Rob--W/cors-anywhere/issues/238#issuecomment-629638853
-            if (/^\/https?:\/[^/]/i.test(req.url)) {
+            if (/^\/https?:\/[^/]/i.test(req.url!)) {
                 res.writeHead(400, "Missing slash", cors_headers);
                 res.end("The URL is invalid: two slashes are needed after the http(s):.");
                 return;
             }
             // Invalid API call. Show how to correctly use the API
-            res.pipe(createReadStream(join(__dirname, "../index.html")));
+            res.end(html);
             return;
         }
 
@@ -282,7 +283,7 @@ function getHandler(options, proxy) {
             return !!(regexp.test(hostname) || net.isIPv4(hostname) || net.isIPv6(hostname));
         }
 
-        if (!/^\/https?:/.test(req.url) && !isValidHostName(location.hostname)) {
+        if (!/^\/https?:/.test(req.url!) && !isValidHostName(location.hostname)) {
             // Don't even try to proxy invalid hosts (such as /favicon.ico, /robots.txt)
 
             const uri = new URL(req.url ?? web_server_url, "http://localhost:3000");
@@ -309,7 +310,7 @@ function getHandler(options, proxy) {
                 const url = uri.searchParams.get("url");
                 return proxyTs(url ?? "", headers, req, res);
             } else if (uri.pathname === "/") {
-                return res.pipe(createReadStream(join(__dirname, "../index.html")));
+                return res.end(html);
             } else {
                 res.writeHead(404, "Invalid host", cors_headers);
                 res.end("Invalid host: " + location.hostname);
@@ -353,7 +354,7 @@ function getHandler(options, proxy) {
             return;
         }
 
-        const isRequestedOverHttps = req.connection.encrypted || /^\s*https/.test(req.headers["x-forwarded-proto"]);
+        const isRequestedOverHttps = (req.connection as any).encrypted || /^\s*https/.test(req.headers["x-forwarded-proto"] as string);
         const proxyBaseUrl = (isRequestedOverHttps ? "https://" : "http://") + req.headers.host;
 
         corsAnywhere.removeHeaders.forEach(function (header) {
@@ -364,8 +365,8 @@ function getHandler(options, proxy) {
             req.headers[header] = corsAnywhere.setHeaders[header];
         });
 
-        req.corsAnywhereRequestState.location = location;
-        req.corsAnywhereRequestState.proxyBaseUrl = proxyBaseUrl;
+        (req as any).corsAnywhereRequestState.location = location;
+        (req as any).corsAnywhereRequestState.proxyBaseUrl = proxyBaseUrl;
 
         proxyRequest(req, res, proxy);
     };
