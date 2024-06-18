@@ -7,7 +7,7 @@ import http, { Server } from "node:http";
 import net from "node:net";
 import url from "node:url";
 import { getProxyForUrl } from "proxy-from-env";
-import { readFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { join } from "node:path";
 import colors from "colors";
 import axios from "axios";
@@ -256,7 +256,7 @@ function getHandler(options, proxy) {
                 return;
             }
             // Invalid API call. Show how to correctly use the API
-            res.end(readFileSync(join(__dirname, "../index.html")));
+            res.pipe(createReadStream(join(__dirname, "../index.html")));
             return;
         }
 
@@ -309,7 +309,7 @@ function getHandler(options, proxy) {
                 const url = uri.searchParams.get("url");
                 return proxyTs(url ?? "", headers, req, res);
             } else if (uri.pathname === "/") {
-                return res.end(readFileSync(join(__dirname, "../index.html")));
+                return res.pipe(createReadStream(join(__dirname, "../index.html")));
             } else {
                 res.writeHead(404, "Invalid host", cors_headers);
                 res.end("Invalid host: " + location.hostname);

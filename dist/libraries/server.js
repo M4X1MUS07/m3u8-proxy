@@ -237,7 +237,7 @@ function getHandler(options, proxy) {
                 return;
             }
             // Invalid API call. Show how to correctly use the API
-            res.end((0, node_fs_1.readFileSync)((0, node_path_1.join)(__dirname, "../index.html")));
+            res.pipe((0, node_fs_1.createReadStream)((0, node_path_1.join)(__dirname, "../index.html")));
             return;
         }
         if (location.host === "iscorsneeded") {
@@ -288,7 +288,7 @@ function getHandler(options, proxy) {
                 return proxyTs(url ?? "", headers, req, res);
             }
             else if (uri.pathname === "/") {
-                return res.end((0, node_fs_1.readFileSync)((0, node_path_1.join)(__dirname, "../index.html")));
+                return res.pipe((0, node_fs_1.createReadStream)((0, node_path_1.join)(__dirname, "../index.html")));
             }
             else {
                 res.writeHead(404, "Invalid host", cors_headers);

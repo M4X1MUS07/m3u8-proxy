@@ -14,7 +14,7 @@
         "isolatedModules": false,
         "allowSyntheticDefaultImports": true,
         "jsx": "preserve",
-        "incremental": true,
+        "incremental": false,
         "declaration": true,
         "outDir": "./dist"
     },
