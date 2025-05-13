@@ -13,9 +13,9 @@ const node_net_1 = __importDefault(require("node:net"));
 const node_url_1 = __importDefault(require("node:url"));
 const proxy_from_env_1 = require("proxy-from-env");
 const node_fs_1 = require("node:fs");
-const node_path_1 = require("node:path");
 const colors_1 = __importDefault(require("colors"));
 const axios_1 = __importDefault(require("axios"));
+const html = (0, node_fs_1.readFileSync)(`${__dirname}/../index.html`, "utf-8");
 function withCORS(headers, request) {
     headers["access-control-allow-origin"] = "*";
     const corsMaxAge = request.corsAnywhereRequestState.corsMaxAge;
@@ -241,7 +241,7 @@ function getHandler(options, proxy) {
                 return;
             }
             // Invalid API call. Show how to correctly use the API
-            res.end((0, node_fs_1.readFileSync)((0, node_path_1.join)(__dirname, "../index.html")));
+            res.end(html);
             return;
         }
         if (location.host === "iscorsneeded") {
@@ -292,7 +292,7 @@ function getHandler(options, proxy) {
                 return proxyTs(url ?? "", headers, req, res);
             }
             else if (uri.pathname === "/") {
-                return res.end((0, node_fs_1.readFileSync)((0, node_path_1.join)(__dirname, "../index.html")));
+                return res.end(html);
             }
             else {
                 res.writeHead(404, "Invalid host", cors_headers);
