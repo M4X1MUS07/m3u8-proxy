@@ -43,13 +43,13 @@ function proxyRequest(req, res, proxy) {
         headers: {
             host: location.host,
         },
-        // HACK: Get hold of the proxyReq object, because we need it later.
-        // https://github.com/nodejitsu/node-http-proxy/blob/v1.11.1/lib/http-proxy/passes/web-incoming.js#L144
+        // Add DNS retry options
+        timeout: 5000,
+        proxyTimeout: 5000,
+        retry: 3,
         buffer: {
             pipe: function (proxyReq) {
                 const proxyReqOn = proxyReq.on;
-                // Intercepts the handler that connects proxyRes to res.
-                // https://github.com/nodejitsu/node-http-proxy/blob/v1.11.1/lib/http-proxy/passes/web-incoming.js#L146-L158
                 proxyReq.on = function (eventName, listener) {
                     if (eventName !== "response") {
                         return proxyReqOn.call(this, eventName, listener);
@@ -60,12 +60,6 @@ function proxyRequest(req, res, proxy) {
                                 listener(proxyRes);
                             }
                             catch (err) {
-                                // Wrap in try-catch because an error could occur:
-                                // "RangeError: Invalid status code: 0"
-                                // https://github.com/Rob--W/cors-anywhere/issues/95
-                                // https://github.com/nodejitsu/node-http-proxy/issues/1080
-                                // Forward error (will ultimately emit the 'error' event on our proxy object):
-                                // https://github.com/nodejitsu/node-http-proxy/blob/v1.11.1/lib/http-proxy/passes/web-incoming.js#L134
                                 proxyReq.emit("error", err);
                             }
                         }
@@ -79,19 +73,29 @@ function proxyRequest(req, res, proxy) {
     if (proxyThroughUrl) {
         proxyOptions.target = proxyThroughUrl;
         proxyOptions.toProxy = true;
-        // If a proxy URL was set, req.url must be an absolute URL. Then the request will not be sent
-        // directly to the proxied URL, but through another proxy.
         req.url = location.href;
     }
-    // Start proxying the request
-    try {
-        proxy.web(req, res, proxyOptions);
-    }
-    catch (err) {
-        console.error(err);
-        console.log(proxy);
-        //proxy.emit('error', err, req, res);
-    }
+    let retries = 0;
+    const maxRetries = 3;
+    const retryDelay = 1000; // 1 second
+    const attemptProxy = () => {
+        try {
+            proxy.web(req, res, proxyOptions);
+        }
+        catch (err) {
+            if (err.code === "EAI_AGAIN" && retries < maxRetries) {
+                retries++;
+                console.warn(`DNS resolution failed, retry attempt ${retries} of ${maxRetries} for ${location.host}`);
+                setTimeout(attemptProxy, retryDelay * retries);
+            }
+            else {
+                console.error("Proxy error:", err);
+                res.writeHead(504, { "Content-Type": "text/plain" });
+                res.end(`Gateway Timeout: Unable to resolve ${location.host}`);
+            }
+        }
+    };
+    attemptProxy();
 }
 function onProxyResponse(proxy, proxyReq, proxyRes, req, res) {
     const requestState = req.corsAnywhereRequestState;
@@ -344,12 +348,14 @@ function getHandler(options, proxy) {
 // Creator still needs to call .listen()
 function createServer(options) {
     options = options || {};
-    // Default options:
     const httpProxyOptions = {
         xfwd: true,
         secure: process.env.NODE_TLS_REJECT_UNAUTHORIZED !== "0",
+        // Add DNS settings
+        timeout: 5000,
+        proxyTimeout: 5000,
+        retry: 3,
     };
-    // Allow user to override defaults and add own options
     if (options.httpProxyOptions) {
         Object.keys(options.httpProxyOptions).forEach(function (option) {
             httpProxyOptions[option] = options.httpProxyOptions[option];
@@ -364,27 +370,32 @@ function createServer(options) {
     else {
         server = node_http_1.default.createServer(requestHandler);
     }
-    // When the server fails, just show a 404 instead of Internal server error
     proxyServer.on("error", function (err, req, res) {
         if (res.headersSent) {
-            // This could happen when a protocol error occurs when an error occurs
-            // after the headers have been received (and forwarded). Do not write
-            // the headers because it would generate an error.
-            // Prior to Node 13.x, the stream would have ended.
-            // As of Node 13.x, we must explicitly close it.
             if (res.writableEnded === false) {
                 res.end();
             }
             return;
         }
-        // When the error occurs after setting headers but before writing the response,
-        // then any previously set headers must be removed.
         const headerNames = res.getHeaderNames ? res.getHeaderNames() : Object.keys(res._headers || {});
         headerNames.forEach(function (name) {
             res.removeHeader(name);
         });
-        res.writeHead(404, { "Access-Control-Allow-Origin": "*" });
-        res.end("Not found because of proxy error: " + err);
+        // Handle DNS errors specifically
+        if (err.code === "EAI_AGAIN") {
+            res.writeHead(504, {
+                "Access-Control-Allow-Origin": "*",
+                "Content-Type": "text/plain",
+            });
+            res.end("DNS resolution failed. Please try again later.");
+        }
+        else {
+            res.writeHead(502, {
+                "Access-Control-Allow-Origin": "*",
+                "Content-Type": "text/plain",
+            });
+            res.end("Proxy error: " + err.message);
+        }
     });
     return server;
 }
@@ -400,7 +411,7 @@ function server() {
         }
         return env.split(",");
     }
-    createServer({
+    const serverInstance = createServer({
         originBlacklist: originBlacklist,
         originWhitelist: originWhitelist,
         requireHeader: [],
@@ -424,9 +435,11 @@ function server() {
             // Do not add X-Forwarded-For, etc. headers, because Heroku already adds it.
             xfwd: false,
         },
-    }).listen(port, Number(host), function () {
+    });
+    serverInstance.listen(port, Number(host), function () {
         console.log(colors_1.default.green("Server running on ") + colors_1.default.blue(`${web_server_url}`));
     });
+    return serverInstance; // Return the server instance
 }
 exports.default = server;
 function createRateLimitChecker(CORSANYWHERE_RATELIMIT) {
@@ -521,7 +534,20 @@ async function proxyM3U8(url, headers, res) {
         // So if there is 360p, 480p, etc. Instead, the URL's of those m3u8 files will be replaced with the proxy URL.
         const lines = m3u8.split("\n");
         const newLines = [];
-        for (const line of lines) {
+        let skipNextLine = false;
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            if (skipNextLine) {
+                skipNextLine = false;
+                continue; // skip URL after 360p info
+            }
+            if (line.startsWith("#EXT-X-STREAM-INF")) {
+                const is360p = line.includes("RESOLUTION=640x360") || line.includes("BANDWIDTH=720000");
+                if (is360p) {
+                    skipNextLine = true; // skip next URL line
+                    continue; // skip this info line too
+                }
+            }
             if (line.startsWith("#")) {
                 if (line.startsWith("#EXT-X-KEY:")) {
                     const regex = /https?:\/\/[^\""\s]+/g;

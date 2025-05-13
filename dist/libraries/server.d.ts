@@ -1,6 +1,6 @@
 /// <reference types="node" />
 import http from "node:http";
-export default function server(): void;
+export default function server(): http.Server<typeof http.IncomingMessage, typeof http.ServerResponse>;
 /**
  * @description Proxies m3u8 files and replaces the content to point to the proxy.
  * @param headers JSON headers
