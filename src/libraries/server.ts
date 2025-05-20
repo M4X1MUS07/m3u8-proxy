@@ -665,63 +665,187 @@ export async function proxyM3U8(url: string, headers: any, res: http.ServerRespo
  * @param req Client request object
  * @param res Server response object
  */
-export async function proxyTs(url: string, headers: any, req, res: http.ServerResponse) {
-    // I love how NodeJS HTTP request client only takes http URLs :D It's so fun!
-    // I'll probably refactor this later.
-
-    let forceHTTPS = false;
-
-    if (url.startsWith("https://")) {
-        forceHTTPS = true;
-    }
+export async function proxyTs(url: string, headers: any, req: http.IncomingMessage, res: http.ServerResponse) {
+    const forceHTTPS = url.startsWith("https://");
 
     const uri = new URL(url);
-
-    // Options
-    // It might be worth adding ...req.headers to the headers object, but once I did that
-    // the code broke and I receive errors such as "Cannot access direct IP" or whatever.
-    const options = {
+    const options: http.RequestOptions | https.RequestOptions = {
         hostname: uri.hostname,
-        port: uri.port,
+        port: uri.port || (forceHTTPS ? 443 : 80),
         path: uri.pathname + uri.search,
         method: req.method,
         headers: {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/80.0.3987.132 Safari/537.36",
+            Connection: "close", // Explicitly request connection closure
             ...headers,
         },
+        timeout: 30000,
     };
 
-    // Proxy request and pipe to client
-    try {
-        if (forceHTTPS) {
-            const proxy = https.request(options, (r) => {
-                r.headers["content-type"] = "video/mp2t";
-                res.writeHead(r.statusCode ?? 200, r.headers);
+    let proxyReq: http.ClientRequest | null = null;
+    let upstreamRes: http.IncomingMessage | null = null;
 
-                r.pipe(res, {
-                    end: true,
-                });
-            });
-
-            req.pipe(proxy, {
-                end: true,
-            });
-        } else {
-            const proxy = http.request(options, (r) => {
-                r.headers["content-type"] = "video/mp2t";
-                res.writeHead(r.statusCode ?? 200, r.headers);
-
-                r.pipe(res, {
-                    end: true,
-                });
-            });
-            req.pipe(proxy, {
-                end: true,
-            });
+    // Function to clean up all resources
+    const cleanup = () => {
+        if (proxyReq && !proxyReq.destroyed) {
+            proxyReq.destroy();
         }
+        if (upstreamRes && !upstreamRes.destroyed) {
+            upstreamRes.destroy();
+        }
+    };
+
+    // Set a timeout for the entire proxy operation
+    const proxyTimeout = setTimeout(() => {
+        console.error("Proxy operation timed out");
+        if (!res.headersSent) {
+            res.writeHead(504); // Gateway Timeout
+            res.end("Proxy Timeout");
+        } else if (!res.writableEnded) {
+            res.end();
+        }
+        cleanup();
+    }, 60000); // 60 second overall timeout
+
+    // Handle client disconnecting from our proxy
+    req.on("close", () => {
+        console.log("Client connection closed by client.");
+        clearTimeout(proxyTimeout);
+        cleanup();
+    });
+
+    // Handle error on the client's request stream to our proxy
+    req.on("error", (err) => {
+        console.error("Client request stream error:", err);
+        clearTimeout(proxyTimeout);
+        if (!res.headersSent) {
+            res.writeHead(500);
+            res.end("Internal Server Error (Client Req Error)");
+        } else if (!res.writableEnded) {
+            res.end();
+        }
+        cleanup();
+    });
+
+    const requestModule = forceHTTPS ? https : http;
+
+    try {
+        proxyReq = requestModule.request(options, (response) => {
+            upstreamRes = response; // Store reference for cleanup
+
+            // Handle error on the upstream response stream
+            upstreamRes.on("error", (err) => {
+                console.error("Upstream response stream error:", err);
+                clearTimeout(proxyTimeout);
+                if (!res.headersSent) {
+                    res.writeHead(502); // Bad Gateway
+                    res.end("Upstream Response Error");
+                } else if (!res.writableEnded) {
+                    res.end();
+                }
+                cleanup();
+            });
+
+            // Prepare headers for the client
+            const clientResHeaders = { ...upstreamRes.headers };
+            clientResHeaders["content-type"] = "video/mp2t"; // Force content type
+
+            // Remove problematic headers
+            delete clientResHeaders["transfer-encoding"];
+            delete clientResHeaders["connection"];
+            delete clientResHeaders["keep-alive"];
+
+            // Set status and headers
+            res.writeHead(upstreamRes.statusCode || 200, clientResHeaders);
+
+            let totalSize = 0;
+            const maxSize = 100 * 1024 * 1024; // 100MB
+
+            upstreamRes.on("data", (chunk) => {
+                totalSize += chunk.length;
+                if (totalSize > maxSize) {
+                    console.warn("Response too large, destroying connections.");
+                    clearTimeout(proxyTimeout);
+                    if (!res.writableEnded) {
+                        if (!res.headersSent) {
+                            res.writeHead(413);
+                        }
+                        res.end("Response too large");
+                    }
+                    cleanup();
+                    return;
+                }
+
+                if (!res.write(chunk)) {
+                    // Handle backpressure
+                    upstreamRes?.pause();
+                }
+            });
+
+            res.on("drain", () => {
+                // Resume reading from upstream when client can receive more
+                if (upstreamRes && !upstreamRes.destroyed) {
+                    upstreamRes.resume();
+                }
+            });
+
+            upstreamRes.on("end", () => {
+                clearTimeout(proxyTimeout);
+                if (!res.writableEnded) {
+                    res.end();
+                }
+                // Just need to clean up proxyReq; upstreamRes will clean itself up
+                if (proxyReq && !proxyReq.destroyed) {
+                    proxyReq.destroy();
+                }
+            });
+        });
+
+        // Set a specific timeout for establishing the connection to the target
+        proxyReq.setTimeout(15000, () => {
+            console.error("Connection to target server timed out");
+            if (!res.headersSent) {
+                res.writeHead(504);
+                res.end("Connection to target timed out");
+            } else if (!res.writableEnded) {
+                res.end();
+            }
+            cleanup();
+        });
+
+        // Handle errors during the proxy request itself
+        proxyReq.on("error", (err) => {
+            console.error("Proxy request to target error:", err);
+            clearTimeout(proxyTimeout);
+            if (!res.headersSent) {
+                res.writeHead(502); // Bad Gateway
+                res.end(`Proxy Error: ${err.message}`);
+            } else if (!res.writableEnded) {
+                res.end();
+            }
+            cleanup();
+        });
+
+        // Pipe the client's request body to the target server
+        // This also handles ending proxyReq when req ends
+        req.pipe(proxyReq, { end: true });
+
+        // Make sure to handle completion of the entire operation
+        res.on("finish", () => {
+            clearTimeout(proxyTimeout);
+            // At this point, res is fully sent to the client
+            // proxyReq may need cleanup if it's still active
+            cleanup();
+        });
     } catch (e: any) {
-        res.writeHead(500);
-        res.end(e.message);
-        return null;
+        console.error("Proxy setup error (proxyTs):", e);
+        clearTimeout(proxyTimeout);
+        if (!res.headersSent) {
+            res.writeHead(500);
+            res.end(`Server Error: ${e.message}`);
+        } else if (!res.writableEnded) {
+            res.end();
+        }
+        cleanup();
     }
 }
